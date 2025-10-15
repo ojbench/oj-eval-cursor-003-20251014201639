@@ -31,6 +31,13 @@ struct Team{
 
     // For fast check: does team currently have any FrozenHidden problem?
     int frozenHiddenCount = 0;
+
+    // Fast QUERY_SUBMISSION support
+    struct LastItem { int pid=-1; Status st=Accepted; int time=-1; bool has=false; };
+    LastItem lastAny;
+    vector<LastItem> lastByProblem;           // size M
+    array<LastItem,4> lastByStatus;           // by status
+    vector<array<LastItem,4>> lastByProblemStatus; // size M x 4
 };
 
 struct Contest{
@@ -61,6 +68,9 @@ static Status parseStatus(const string &s){
 static void ensureTeamProbsSized(){
     for(auto &t: G.teams){
         if((int)t.probs.size()<G.M) t.probs.assign(G.M, ProblemState());
+        // Initialize last submission caches when M is known
+        t.lastByProblem.assign(G.M, Team::LastItem());
+        t.lastByProblemStatus.assign(G.M, array<Team::LastItem,4>());
     }
 }
 
@@ -378,9 +388,7 @@ static void doQuerySubmission(const string &teamName, const string &probFilter, 
     // To satisfy, we create an auxiliary static per-team log lazily.
 }
 
-// We'll maintain a global submission log to support QUERY_SUBMISSION
-struct SubmissionItem{ int tid; int pid; Status st; int time; };
-static vector<SubmissionItem> globalSubmissions;
+// We'll still keep a minimal global log declaration removed; now O(1) per query via caches
 
 static void completeQuerySubmission(const string &teamName, const string &probFilter, const string &statusFilter){
     auto it = G.nameToId.find(teamName);
@@ -389,40 +397,52 @@ static void completeQuerySubmission(const string &teamName, const string &probFi
         return;
     }
     int tid = it->second;
-    int pidFilter = -1; bool anyProb = false;
-    if(probFilter=="ALL") anyProb=true; else pidFilter = probFilter[0]-'A';
-    int stMask = -1; bool anyStatus = false; Status stWanted = Accepted;
-    if(statusFilter=="ALL") anyStatus=true; else stWanted = parseStatus(statusFilter);
+    bool anyProb = (probFilter=="ALL");
+    int pidFilter = anyProb ? -1 : (probFilter[0]-'A');
+    bool anyStatus = (statusFilter=="ALL");
+    Status stWanted = anyStatus ? Accepted : parseStatus(statusFilter);
 
-    int foundIndex = -1;
-    for(int i=(int)globalSubmissions.size()-1;i>=0;--i){
-        const auto &e = globalSubmissions[i];
-        if(e.tid!=tid) continue;
-        if(!anyProb && e.pid!=pidFilter) continue;
-        if(!anyStatus && e.st!=stWanted) continue;
-        foundIndex = i; break;
+    const Team &t = G.teams[tid];
+    Team::LastItem item;
+    if(anyProb && anyStatus){
+        item = t.lastAny;
+    }else if(!anyProb && anyStatus){
+        if(pidFilter>=0 && pidFilter<G.M) item = t.lastByProblem[pidFilter];
+        else item.has = false;
+    }else if(anyProb && !anyStatus){
+        item = t.lastByStatus[(int)stWanted];
+    }else{
+        if(pidFilter>=0 && pidFilter<G.M) item = t.lastByProblemStatus[pidFilter][(int)stWanted];
+        else item.has = false;
     }
     cout << "[Info]Complete query submission.\n";
-    if(foundIndex==-1){
+    if(!item.has){
         cout << "Cannot find any submission.\n";
         return;
     }
-    const auto &e = globalSubmissions[foundIndex];
-    cout << G.teams[e.tid].name << ' ' << char('A'+e.pid) << ' ';
-    switch(e.st){
+    cout << t.name << ' ' << char('A'+item.pid) << ' ';
+    switch(item.st){
         case Accepted: cout << "Accepted"; break;
         case Wrong_Answer: cout << "Wrong_Answer"; break;
         case Runtime_Error: cout << "Runtime_Error"; break;
         case Time_Limit_Exceed: cout << "Time_Limit_Exceed"; break;
     }
-    cout << ' ' << e.time << "\n";
+    cout << ' ' << item.time << "\n";
 }
 
 static void handleSubmitAndLog(char problemChar, const string &teamName, Status st, int time){
     int tid = G.nameToId[teamName];
     int pid = problemChar - 'A';
-    globalSubmissions.push_back({tid,pid,st,time});
     submitEvent(problemChar, teamName, st, time);
+    // Update fast query caches
+    Team &t = G.teams[tid];
+    Team::LastItem li; li.pid = pid; li.st = st; li.time = time; li.has = true;
+    t.lastAny = li;
+    if(pid>=0 && pid<G.M){
+        t.lastByProblem[pid] = li;
+        t.lastByProblemStatus[pid][(int)st] = li;
+    }
+    t.lastByStatus[(int)st] = li;
 }
 
 int main(){
