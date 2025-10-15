@@ -254,74 +254,81 @@ static void doFreezeCommand(){
 static void doScrollCommand(){
     if(!G.frozen){ cout << "[Error]Scroll failed: scoreboard has not been frozen.\n"; return; }
 
-    // Flush to get current visible metrics and ranking, then output prompt and pre-scroll scoreboard
+    // First flush to have accurate ranking, then output pre-scroll scoreboard
     performFlush(false);
     cout << "[Info]Scroll scoreboard.\n";
     printScoreboardByOrder(G.lastRanking);
 
-    // Prepare ranking order and position map
-    vector<int> order = G.lastRanking; // best -> worst
-    vector<int> pos(G.teams.size());
-    for(size_t i=0;i<order.size();++i) pos[order[i]] = (int)i;
+    // Prepare ordered sets for dynamic ranking during scroll
+    computeAllVisible();
+    vector<int> ids(G.teams.size()); iota(ids.begin(), ids.end(), 0);
+    struct Cmp {
+        bool operator()(int a, int b) const { return RankCmp()(a,b); }
+    };
+    std::set<int, Cmp> rankSet(ids.begin(), ids.end());
+
+    auto hasFrozenHidden = [&](int tid)->bool{
+        return G.teams[tid].frozenHiddenCount>0;
+    };
+    std::set<int, Cmp> frozenSet; // teams with any FrozenHidden problems
+    for(int tid: ids){ if(hasFrozenHidden(tid)) frozenSet.insert(tid); }
 
     auto smallestFrozenProblem = [&](Team &t)->int{
         for(int i=0;i<G.M;i++) if(t.probs[i].fstate==ProblemState::FrozenHidden) return i;
         return -1;
     };
 
-    // A max-heap by rank index (largest index = lowest-ranked)
-    using Node = pair<int,int>; // (pos, tid)
-    priority_queue<Node> pq;
-    for(size_t i=0;i<order.size();++i){
-        int tid = order[i];
-        if(G.teams[tid].frozenHiddenCount>0) pq.push({(int)i, tid});
-    }
-
-    RankCmp cmp;
-    while(!pq.empty()){
-        auto [pidx, tid] = pq.top(); pq.pop();
-        if(G.teams[tid].frozenHiddenCount==0) continue; // outdated
-        if(pos[tid]!=pidx){
-            pq.push({pos[tid], tid});
-            continue;
-        }
+    // Iterate unfreezing until no frozen problems remain
+    while(!frozenSet.empty()){
+        // pick lowest-ranked team among those with frozen problems: last element
+        auto itLowest = prev(frozenSet.end());
+        int tid = *itLowest;
         Team &t = G.teams[tid];
-        // Unfreeze this team's smallest frozen problem
+
+        // Save neighbors around old position
+        auto itOld = rankSet.find(tid);
+        int oldPred = -1, oldSucc = -1;
+        if(itOld!=rankSet.begin()){
+            auto itp = prev(itOld); oldPred = *itp;
+        }
+        auto its = next(itOld);
+        if(its!=rankSet.end()) oldSucc = *its;
+
+        // Unfreeze smallest problem for this team
         int pid = smallestFrozenProblem(t);
         if(pid==-1){
-            // No longer frozen; skip
+            // Should not happen, but remove from frozenSet
+            frozenSet.erase(itLowest);
             continue;
         }
-        ProblemState &pr = t.probs[pid];
-        pr.fstate = ProblemState::Revealed;
-        t.frozenHiddenCount--;
+        // Reveal it
+        ProblemState &p = t.probs[pid];
+        if(p.fstate==ProblemState::FrozenHidden){
+            p.fstate = ProblemState::Revealed;
+            t.frozenHiddenCount--;
+        }
 
-        // Recompute this team's visible metrics
-        int oldPos = pos[tid];
+        // Recompute this team's visible stats
+        rankSet.erase(itOld);
+        frozenSet.erase(itLowest);
         recomputeVisibleForTeam(t);
+        auto itNew = rankSet.insert(tid).first;
+        if(hasFrozenHidden(tid)) frozenSet.insert(tid);
 
-        // Move upwards as needed
-        int cur = oldPos;
-        while(cur>0 && cmp(tid, order[cur-1])){
-            int other = order[cur-1];
-            swap(order[cur], order[cur-1]);
-            pos[tid] = cur-1;
-            pos[other] = cur;
-            cur--;
-            // If swapped team also has frozen problems, push updated key
-            if(G.teams[other].frozenHiddenCount>0){
-                pq.push({pos[other], other});
-            }
+        // Determine if ranking changed
+        int newPred = -1, newSucc = -1;
+        if(itNew!=rankSet.begin()){
+            auto itp = prev(itNew); newPred = *itp;
         }
-        bool changed = (cur != oldPos);
+        auto its2 = next(itNew);
+        if(its2!=rankSet.end()) newSucc = *its2;
+
+        bool changed = (oldPred!=newPred) || (oldSucc!=newSucc);
         if(changed){
+            // Output: team_name1 team_name2 solved_number penalty_time
             string team1 = t.name;
-            string team2 = G.teams[ order[cur+1] ].name; // the team just below after move
+            string team2 = (newSucc==-1? string("") : G.teams[newSucc].name);
             cout << team1 << ' ' << team2 << ' ' << t.visSolved << ' ' << t.visPenalty << "\n";
-        }
-        // If this team still has frozen problems, push with updated position
-        if(t.frozenHiddenCount>0){
-            pq.push({pos[tid], tid});
         }
     }
 
